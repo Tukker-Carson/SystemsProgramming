@@ -7,11 +7,13 @@ PAGE_SIZE = 4096
 
 # Page Table Entry object to make it easy to store a frame and the dirty bit
 class PageTableEntry:
-    def __init__(self, frame=None, dirty=False):
+    def __init__(self, frame=None, dirty=False, counter=0):
         self.frame = frame
         self.dirty = dirty
+        self.accessTime = counter
+        self.hasLife = True
 
-# Abstrace Pager (except I don't like python object oriented programming so it's not actually abstract)
+# Abstract Pager (except I don't like python object oriented programming so it's not actually abstract)
 class Pager:
     def __init__(self, nframes, trace, debug):
         self.nframes = nframes
@@ -34,7 +36,7 @@ class Pager:
                 entry.dirty = True
             if self.debug:
                 print(f"Hit Page, Frame - {page}, {entry.frame}")
-            self.on_hit(page, entry.frame)
+            self.on_hit(page, entry)
             return
         
         # Miss - Load New Page
@@ -57,7 +59,7 @@ class Pager:
             old_entry.dirty = False
 
         self.frames[new_frame] = page
-        new_entry = PageTableEntry()
+        new_entry = PageTableEntry(counter=self.counter)
         self.page_table[page] = new_entry
 
         if self.debug:
@@ -65,7 +67,7 @@ class Pager:
         new_entry.frame = new_frame
         new_entry.dirty = write
 
-        self.on_load(page, new_frame)
+        self.on_load(page, new_entry)
 
     def run(self):
         for addr, op in self.trace:
@@ -76,10 +78,10 @@ class Pager:
         return self.nreads, self.nwrites
 
     # Overrides
-    def on_hit(self, page, frame):
+    def on_hit(self, page, entry):
         pass
 
-    def on_load(self, page, frame):
+    def on_load(self, page, entry):
         pass
 
     def drop_frame(self):
@@ -98,24 +100,69 @@ class FIFOPager(Pager):
         super().__init__(nframes, trace, debug)
         self.queue = deque()
 
-    def on_load(self, page, frame):
-        if frame not in self.queue:
-            self.queue.append(frame)
+    def on_load(self, page, entry):
+        if entry.frame not in self.queue:
+            self.queue.append(entry.frame)
 
     def drop_frame(self):
         return self.queue.popleft()
         
+class LRUPager(Pager):
+    def on_hit(self, page, entry):
+        entry.accessTime = self.counter
+    
+    def drop_frame(self):
+        lruFrame = (0,None)
+        for i,frame in enumerate(self.frames):
+            value = self.page_table[frame].accessTime
+            if lruFrame[1] is None or value <= lruFrame[1]:
+                lruFrame = (i,value)
+        return lruFrame[0]
 
+class ClockPager(Pager):
+    def __init__(self, nframes, trace, debug):
+        super().__init__(nframes, trace, debug)
+        self.queue = deque()
+    
+    def on_load(self, page, entry):
+        if entry.frame not in self.queue:
+            self.queue.append(entry.frame)
+    
+    def on_hit(self, page, entry):
+        entry.hasLife = True
 
-## GRANT PUT STUFF HERE ##
+    def drop_frame(self):
+        while True:
+            leftFrame = self.queue.popleft()
+            if self.page_table[self.frames[leftFrame]].hasLife is False:
+                return leftFrame
+            else:
+                self.page_table[self.frames[leftFrame]].hasLife = False
+                self.queue.append(leftFrame)
 
+class IdealPager(Pager):
+    def futureSight(self, page):
+        for i,address in enumerate(trace[self.counter+1:]):
+            address = address[0] // PAGE_SIZE
+            if address == page:
+                return i + self.counter + 1
+        return None
 
-
-
-
-
-
-
+    def on_hit(self, page, entry):
+        entry.accessTime = self.futureSight(page)
+    
+    def on_load(self, page, entry):
+        entry.accessTime = self.futureSight(page)
+        
+    def drop_frame(self):
+        lruFrame = (0,None)
+        for i,frame in enumerate(self.frames):
+            value = self.page_table[frame].accessTime
+            if value is None:
+                return i
+            if lruFrame[1] is None or value >= lruFrame[1]:
+                lruFrame = (i,value)
+        return lruFrame[0]
 
 
 if __name__ == "__main__":
